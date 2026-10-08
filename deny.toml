@@ -1,0 +1,30 @@
+# Dependency policy, checked in CI by cargo-deny:
+# https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+all-features = true
+
+[advisories]
+# Security advisories fail the check for every crate. An unmaintained crate
+# fails it only as a direct dependency, where we can replace it.
+unmaintained = "workspace"
+yanked = "deny"
+
+[licenses]
+# Only licenses compatible with distributing pnyx under MIT or Apache-2.0.
+allow = [
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

@@ -1,0 +1,70 @@
+[package]
+name = "pnyx"
+description = "CASPaxos with reconfiguration: a leaderless, logless register changed by compare-and-set, independent of the transport"
+version = "0.1.0"
+authors = ["Jonathan Anderson <janderson@janderson.ca>"]
+edition = "2024"
+# The oldest Rust that builds the dependencies; CI checks it.
+rust-version = "1.91"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/jdpanderson/pnyx"
+readme = "README.md"
+keywords = ["paxos", "caspaxos", "consensus", "distributed", "replication"]
+categories = ["algorithms", "concurrency", "network-programming"]
+include = ["/examples", "/src", "/tests", "/README.md", "/CHANGELOG.md", "/LICENSE-APACHE", "/LICENSE-MIT"]
+
+[features]
+default = ["store", "tokio"]
+# `store`: keeps an acceptor's state in a file.
+store = ["dep:crc32fast", "dep:postcard"]
+# `tokio`: `propose`, which runs one change over a `Transport` on Tokio.
+tokio = ["dep:futures-util", "dep:rand", "dep:tokio"]
+
+[dependencies]
+crc32fast = { version = "1.5", optional = true }
+futures-util = { version = "0.3.31", default-features = false, features = ["std", "async-await"], optional = true }
+postcard = { version = "1.0.8", default-features = false, features = ["use-std"], optional = true }
+rand = { version = "0.10", optional = true }
+serde = { version = "1.0.220", features = ["derive"] }
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "time"], optional = true }
+
+[dev-dependencies]
+proptest = { version = "1.11", default-features = false, features = ["std"] }
+rand = "0.10"
+stateright = "0.31"
+tempfile = "3.0.2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+
+[[test]]
+name = "driver"
+required-features = ["tokio"]
+
+[[example]]
+name = "cluster"
+required-features = ["store", "tokio"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[lints.rust]
+rust_2018_idioms = { level = "warn", priority = -1 }
+missing_debug_implementations = "warn"
+missing_docs = "warn"
+unsafe_code = "forbid"
+
+[lints.clippy]
+dbg_macro = "warn"
+missing_errors_doc = "warn"
+missing_panics_doc = "warn"
+todo = "warn"
+unimplemented = "warn"
+
+# The model check visits millions of states; without optimisation it takes
+# minutes instead of seconds.
+[profile.dev.package.pnyx]
+opt-level = 3
+
+[profile.dev.package.stateright]
+opt-level = 3

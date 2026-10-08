@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 229b19bcbd398e0756e82bf44ff15aa4d044b365bbf26056afb9e9987972ab62 # shrinks to start_with_genesis = false, ops = [Endorse(Ballot { counter: 3, node: 4 }, Agreed { version: 0, config: Config { number: 1, protected: false, acceptors: {} }, next: None, value: 0 }), Learn(Chosen { value: Agreed { version: 0, config: Config { number: 2, protected: false, acceptors: {} }, next: Some(Config { number: 0, protected: false, acceptors: {0} }), value: 0 }, ballot: None }), Learn(Chosen { value: Agreed { version: 1, config: Config { number: 0, protected: false, acceptors: {} }, next: Some(Config { number: 0, protected: false, acceptors: {0} }), value: 0 }, ballot: None }), Endorse(Ballot { counter: 3, node: 4 }, Agreed { version: 0, config: Config { number: 1, protected: false, acceptors: {} }, next: None, value: 1 })]

@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 46a7c5440695b5a68f4e5be5d52bc606b7b9b35b2a838ef3166110b91f8d3ed9 # shrinks to ops = [Begin, Receive { from: 1, reply: Promise { config: 0, ballot: Ballot { counter: 0, node: 0 }, accepted: None }, aim: true }, Receive { from: 0, reply: Stale { learned: Chosen { value: Agreed { version: 1, config: Config { number: 0, protected: false, acceptors: {0} }, next: None, value: 0 }, ballot: None } }, aim: false }, Receive { from: 0, reply: Promise { config: 0, ballot: Ballot { counter: 0, node: 0 }, accepted: None }, aim: true }]
