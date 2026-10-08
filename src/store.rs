@@ -8,6 +8,10 @@
 //! or create files, so they are durable on every system with a working sync of
 //! file data, including Windows.
 //!
+//! [`remove`] deletes a store. It first makes both copies invalid, the older
+//! one first, so a crash during the removal never leaves an older state. A
+//! store that a removal stopped part of the way through opens as no store.
+//!
 //! Files are created only when a store is created, and their creation is
 //! durable once the directory is synced. On Unix, the directory is synced
 //! then. Windows has no documented way to sync a directory, so a power loss
@@ -47,7 +51,13 @@ const FORMAT_VERSION: u16 = 1;
 /// | end..end+4 | CRC-32 of bytes 0..end                   |
 ///
 /// Any bytes after the checksum are ignored.
+///
+/// Saves start at sequence number 1. A copy with sequence number 0 and an
+/// empty body is a copy that [`remove`] made invalid.
 const HEADER_LEN: usize = 22;
+
+/// The sequence number of a copy that [`remove`] made invalid.
+const REMOVED: u64 = 0;
 
 /// An acceptor whose state is saved to disk before each reply.
 ///
@@ -94,16 +104,33 @@ where
     /// [`io::ErrorKind::InvalidData`] if neither copy is valid or a copy has
     /// another format version.
     pub fn open(path: PathBuf) -> io::Result<Self> {
-        let paths = copy_paths(path);
-        let copies = [read_copy(&paths[0])?, read_copy(&paths[1])?];
-        if copies.iter().all(|c| matches!(c, Found::Missing)) {
-            return Self::create_at(paths, Acceptor::default());
+        match Self::open_existing(path.clone())? {
+            Some(stored) => Ok(stored),
+            None => Self::create(path, Acceptor::default()),
         }
-        let valid = copies.iter().enumerate().filter_map(|(i, c)| match c {
-            Found::Valid { sequence, .. } => Some((*sequence, i)),
-            _ => None,
-        });
-        let Some((sequence, current)) = valid.max() else {
+    }
+
+    /// Opens the acceptor state in `<path>.0` and `<path>.1`. Returns `None`,
+    /// and creates nothing, if neither file exists, or if a [`remove`] of the
+    /// store was stopped by a crash.
+    ///
+    /// If only one file exists, as after a crash while the store was created,
+    /// it opens that copy and writes the other one, as [`Stored::open`] does.
+    ///
+    /// # Errors
+    ///
+    /// As [`Stored::open`].
+    pub fn open_existing(path: PathBuf) -> io::Result<Option<Self>> {
+        let paths = copy_paths(&path);
+        let copies = [read_copy(&paths[0])?, read_copy(&paths[1])?];
+        if copies.iter().all(|c| matches!(c, Found::Missing))
+            || copies.iter().any(|c| matches!(c, Found::Removed))
+        {
+            return Ok(None);
+        }
+        let [a, b] = copies;
+        let copies = [decode(a)?, decode(b)?];
+        let Some((sequence, current)) = newest(&paths, &copies)? else {
             return Err(invalid_data(format!(
                 "no valid copy of the acceptor state in {} or {}",
                 paths[0].display(),
@@ -111,12 +138,6 @@ where
             )));
         };
         let other = 1 - current;
-        if matches!(&copies[other], Found::Valid { sequence: s, .. } if *s == sequence) {
-            return Err(invalid_data(format!(
-                "both copies of the acceptor state in {} have sequence number {sequence}",
-                paths[0].display(),
-            )));
-        }
         let missing = matches!(copies[other], Found::Missing);
         let [a, b] = copies;
         let Found::Valid { acceptor, .. } = (if current == 0 { a } else { b }) else {
@@ -134,7 +155,7 @@ where
             stored.save(&stored.acceptor.clone(), Mode::Create)?;
             sync_dir(&stored.paths[0])?;
         }
-        Ok(stored)
+        Ok(Some(stored))
     }
 
     /// Saves `acceptor` as the state in `<path>.0` and `<path>.1`, in place of
@@ -144,10 +165,7 @@ where
     ///
     /// Fails if a file can't be written.
     pub fn create(path: PathBuf, acceptor: Acceptor<N, V, P>) -> io::Result<Self> {
-        Self::create_at(copy_paths(path), acceptor)
-    }
-
-    fn create_at(paths: [PathBuf; 2], acceptor: Acceptor<N, V, P>) -> io::Result<Self> {
+        let paths = copy_paths(&path);
         // Copy 1 is written last, so until the store is created, a valid
         // copy 1 from before keeps the state from before.
         let mut stored = Stored {
@@ -204,14 +222,21 @@ where
         self.update(|next| Ok(next.handle_proven(req, proof)?))
     }
 
-    /// Records an agreed value (see [`Acceptor::learn`]).
+    /// Records an agreed value (see [`Acceptor::learn`]). Returns `true` if
+    /// the value was learned and saved: the acceptor's learned value is now
+    /// `chosen`. Returns `false` if the acceptor ignored it; then nothing was
+    /// saved. A value with the same version as the learned value is ignored,
+    /// so learning a value again returns `false`.
     ///
     /// # Errors
     ///
     /// Fails if the new state can't be saved. The state is then left as it
     /// was.
-    pub fn learn(&mut self, chosen: Chosen<N, V>, proof: P) -> io::Result<()> {
-        self.update(|next| Ok(((), next.learn(chosen, proof))))
+    pub fn learn(&mut self, chosen: Chosen<N, V>, proof: P) -> io::Result<bool> {
+        self.update(|next| {
+            let learned = next.learn(chosen, proof);
+            Ok((learned, learned))
+        })
     }
 
     /// Every mutation uses the same save-before-publish boundary. Changes
@@ -258,7 +283,77 @@ enum Mode {
     Overwrite,
 }
 
-fn copy_paths(path: PathBuf) -> [PathBuf; 2] {
+/// Removes the acceptor state at `path`, if there is one. When this returns,
+/// the removal is durable (on Unix, the directory is synced).
+///
+/// After a crash during `remove`, [`Stored::open_existing`] gives either the
+/// state from before the removal, or `None`. It never gives an older state.
+///
+/// # Errors
+///
+/// Fails if a file can't be read, written, removed or synced. The store may
+/// then be partly removed; calling `remove` again finishes it. Fails with
+/// [`io::ErrorKind::InvalidData`], and changes nothing, if a copy has another
+/// format version or both copies have the same sequence number: then which
+/// copy is newer is not known, so no order of removal is safe.
+pub fn remove(path: &Path) -> io::Result<()> {
+    let paths = copy_paths(path);
+    for step in removal(&paths)? {
+        step.run(&paths)?;
+    }
+    Ok(())
+}
+
+/// One step of [`remove`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Step {
+    /// Write the removed marker over a copy, and sync it.
+    Invalidate(usize),
+    /// Delete a copy.
+    Delete(usize),
+    /// Sync the directory, so that the deletes are durable.
+    SyncDir,
+}
+
+impl Step {
+    fn run(self, paths: &[PathBuf; 2]) -> io::Result<()> {
+        match self {
+            Step::Invalidate(i) => write_copy(&paths[i], &encode_removed()?, Mode::Overwrite),
+            Step::Delete(i) => fs::remove_file(&paths[i]),
+            Step::SyncDir => sync_dir(&paths[0]),
+        }
+    }
+}
+
+/// The steps that remove the store in `paths`.
+///
+/// Each copy that may hold a state is made invalid before any file is
+/// deleted, and the older copy before the newer one. So once a copy holds the
+/// removed marker, and the store opens as no store, the only other valid copy
+/// is the newer one. Before that, a crash while the marker is written leaves
+/// the older copy torn, and the store opens as the newer copy.
+fn removal(paths: &[PathBuf; 2]) -> io::Result<Vec<Step>> {
+    let copies = [read_copy(&paths[0])?, read_copy(&paths[1])?];
+    let order = match newest(paths, &copies)? {
+        Some((_, current)) => [1 - current, current],
+        None => [0, 1],
+    };
+    let present = order
+        .into_iter()
+        .filter(|&i| !matches!(copies[i], Found::Missing));
+    let invalidate = present
+        .clone()
+        .filter(|&i| !matches!(copies[i], Found::Removed))
+        .map(Step::Invalidate);
+    Ok(invalidate
+        .chain(present.map(Step::Delete))
+        .chain([Step::SyncDir])
+        .collect())
+}
+
+/// The two files that a store at `path` keeps its state in: `<path>.0` and
+/// `<path>.1`.
+fn copy_paths(path: &Path) -> [PathBuf; 2] {
     let with = |suffix: &str| {
         let mut p = OsString::from(path.as_os_str());
         p.push(suffix);
@@ -282,19 +377,67 @@ fn encode<T: Serialize>(sequence: u64, value: &T) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-/// What [`read_copy`] found in one file.
+/// The removed marker: a copy with sequence number [`REMOVED`] and an empty
+/// body. `()` encodes to no bytes.
+fn encode_removed() -> io::Result<Vec<u8>> {
+    encode(REMOVED, &())
+}
+
+/// What [`read_copy`] found in one file. [`read_copy`] gives the body of a
+/// valid copy as bytes, and [`decode`] turns it into an acceptor.
 enum Found<T> {
     Missing,
     /// Not a complete copy: a write to it was interrupted, or the file is
     /// damaged.
     Torn,
+    /// A copy that [`remove`] made invalid.
+    Removed,
     Valid {
         sequence: u64,
         acceptor: T,
     },
 }
 
-fn read_copy<T: DeserializeOwned>(path: &Path) -> io::Result<Found<T>> {
+/// The sequence number and index of the newest valid copy, if any.
+///
+/// # Errors
+///
+/// Fails with [`io::ErrorKind::InvalidData`] if both copies have the same
+/// sequence number.
+fn newest<T>(paths: &[PathBuf; 2], copies: &[Found<T>; 2]) -> io::Result<Option<(u64, usize)>> {
+    let valid = copies.iter().enumerate().filter_map(|(i, c)| match c {
+        Found::Valid { sequence, .. } => Some((*sequence, i)),
+        _ => None,
+    });
+    let newest = valid.max();
+    if let Some((sequence, current)) = newest
+        && matches!(&copies[1 - current], Found::Valid { sequence: s, .. } if *s == sequence)
+    {
+        return Err(invalid_data(format!(
+            "both copies of the acceptor state in {} have sequence number {sequence}",
+            paths[0].display(),
+        )));
+    }
+    Ok(newest)
+}
+
+/// Decodes the body of a valid copy.
+fn decode<T: DeserializeOwned>(found: Found<Vec<u8>>) -> io::Result<Found<T>> {
+    Ok(match found {
+        Found::Missing => Found::Missing,
+        Found::Torn => Found::Torn,
+        Found::Removed => Found::Removed,
+        // The checksum matches, so these are the bytes that were written. If
+        // they don't decode, the caller's types don't match the file.
+        Found::Valid { sequence, acceptor } => Found::Valid {
+            sequence,
+            acceptor: postcard::from_bytes(&acceptor)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
+        },
+    })
+}
+
+fn read_copy(path: &Path) -> io::Result<Found<Vec<u8>>> {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Found::Missing),
@@ -334,11 +477,22 @@ fn read_copy<T: DeserializeOwned>(path: &Path) -> io::Result<Found<T>> {
     if crc32fast::hash(covered) != checksum {
         return Ok(Found::Torn);
     }
-    // The checksum matches, so these are the bytes that were written. If
-    // they don't decode, the caller's types don't match the file.
-    let acceptor = postcard::from_bytes(&covered[HEADER_LEN..])
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    Ok(Found::Valid { sequence, acceptor })
+    let body = &covered[HEADER_LEN..];
+    if sequence == REMOVED {
+        // The checksum matches, so pnyx wrote this copy, and pnyx writes
+        // sequence number 0 only as the removed marker.
+        if !body.is_empty() {
+            return Err(invalid_data(format!(
+                "{} has sequence number {REMOVED} and a body",
+                path.display()
+            )));
+        }
+        return Ok(Found::Removed);
+    }
+    Ok(Found::Valid {
+        sequence,
+        acceptor: body.to_vec(),
+    })
 }
 
 /// `N` bytes of `bytes`, starting at `at`.
