@@ -1,7 +1,7 @@
 [package]
 name = "pnyx"
 description = "CASPaxos with reconfiguration: a leaderless, logless register changed by compare-and-set, independent of the transport"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Jonathan Anderson <janderson@janderson.ca>"]
 edition = "2024"
 # The oldest Rust that builds the dependencies; CI checks it.

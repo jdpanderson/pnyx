@@ -31,7 +31,7 @@ layer for one faulty acceptor needs from the acceptor's saved state; see
 
 ```toml
 [dependencies]
-pnyx = "0.1"
+pnyx = "0.2"
 ```
 
 | Feature | Default | What it adds |
