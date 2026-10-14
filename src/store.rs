@@ -18,6 +18,23 @@
 //! right after a store is created on Windows can undo the creation of its
 //! files.
 //!
+//! # Files
+//!
+//! A store at `path` uses the two files that [`paths`] gives: `<path>.0` and
+//! `<path>.1`. They hold the whole acceptor state.
+//!
+//! On Unix, new files are readable and writable by their owner only: mode
+//! `0600`, less the umask. A file that exists keeps its mode, so
+//! [`Stored::create`] over a store doesn't change it. On Windows, new files
+//! take the access list of their directory, so a caller restricts access
+//! through the directory.
+//!
+//! Saves never rename, replace or create the files, so the permissions and
+//! owner that a caller sets stay in place. A caller may change them, as long
+//! as the process can still read and write both files. Only [`Stored::create`]
+//! creates files, and so does [`Stored::open_existing`] when it writes a
+//! missing copy again.
+//!
 //! The functions here block on file I/O, including a sync to disk. In async
 //! code, call them where blocking is allowed, such as in
 //! `tokio::task::spawn_blocking`.
@@ -121,7 +138,7 @@ where
     ///
     /// As [`Stored::open`].
     pub fn open_existing(path: PathBuf) -> io::Result<Option<Self>> {
-        let paths = copy_paths(&path);
+        let paths = paths(&path);
         let copies = [read_copy(&paths[0])?, read_copy(&paths[1])?];
         if copies.iter().all(|c| matches!(c, Found::Missing))
             || copies.iter().any(|c| matches!(c, Found::Removed))
@@ -165,7 +182,7 @@ where
     ///
     /// Fails if a file can't be written.
     pub fn create(path: PathBuf, acceptor: Acceptor<N, V, P>) -> io::Result<Self> {
-        let paths = copy_paths(&path);
+        let paths = paths(&path);
         // Copy 1 is written last, so until the store is created, a valid
         // copy 1 from before keeps the state from before.
         let mut stored = Stored {
@@ -184,6 +201,12 @@ where
     /// The acceptor, as last saved.
     pub fn acceptor(&self) -> &Acceptor<N, V, P> {
         &self.acceptor
+    }
+
+    /// The two files that hold the state: `<path>.0` and `<path>.1` (see
+    /// [`paths`]).
+    pub fn paths(&self) -> &[PathBuf; 2] {
+        &self.paths
     }
 
     /// Answers a request, once the new state is on disk (see
@@ -297,7 +320,7 @@ enum Mode {
 /// format version or both copies have the same sequence number: then which
 /// copy is newer is not known, so no order of removal is safe.
 pub fn remove(path: &Path) -> io::Result<()> {
-    let paths = copy_paths(path);
+    let paths = paths(path);
     for step in removal(&paths)? {
         step.run(&paths)?;
     }
@@ -352,8 +375,12 @@ fn removal(paths: &[PathBuf; 2]) -> io::Result<Vec<Step>> {
 }
 
 /// The two files that a store at `path` keeps its state in: `<path>.0` and
-/// `<path>.1`.
-fn copy_paths(path: &Path) -> [PathBuf; 2] {
+/// `<path>.1`. The suffix is added to the whole path, so a store at
+/// `acceptor.bin` uses `acceptor.bin.0` and `acceptor.bin.1`.
+///
+/// A caller can use these to check, back up or change the files (see the
+/// [module documentation](self)).
+pub fn paths(path: &Path) -> [PathBuf; 2] {
     let with = |suffix: &str| {
         let mut p = OsString::from(path.as_os_str());
         p.push(suffix);
@@ -502,11 +529,19 @@ fn field<const N: usize>(bytes: &[u8], at: usize) -> Option<[u8; N]> {
 
 /// Writes `bytes` from the start of the file at `path`, and syncs it.
 fn write_copy(path: &Path, bytes: &[u8], mode: Mode) -> io::Result<()> {
-    let mut file = OpenOptions::new()
+    let mut options = OpenOptions::new();
+    options
         .write(true)
         .create(matches!(mode, Mode::Create))
-        .truncate(false)
-        .open(path)?;
+        .truncate(false);
+    #[cfg(unix)]
+    {
+        // The mode is used only when the file is created. A file that exists
+        // keeps its mode.
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
     file.write_all(bytes)?;
     // Bytes after the checksum are ignored, so this only keeps the file
     // small.

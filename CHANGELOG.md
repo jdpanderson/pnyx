@@ -7,6 +7,18 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- `store::paths`, which gives the two files of a store, and
+  `store::Stored::paths`, which gives them for an open store.
+
+### Changed
+
+- On Unix, a store's files are created with mode `0600`: readable and
+  writable by their owner only. Files that exist keep their mode. A store
+  that is created by one user and opened by another now needs its mode or
+  owner changed after `store::Stored::create`.
+
 ## [0.2.0] - 2026-10-08
 
 ### Added
