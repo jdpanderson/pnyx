@@ -19,7 +19,7 @@ fn new_store() -> (tempfile::TempDir, PathBuf, [PathBuf; 2], Store) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("acceptor");
     let store = Store::create(path.clone(), genesis()).unwrap();
-    let copies = copy_paths(&path);
+    let copies = paths(&path);
     (dir, path, copies, store)
 }
 
@@ -68,7 +68,7 @@ fn open_creates_an_empty_store() {
     let path = dir.path().join("acceptor");
     let a = Store::open(path.clone()).unwrap();
     assert_eq!(a.acceptor(), &Acceptor::default());
-    for copy in copy_paths(&path) {
+    for copy in paths(&path) {
         assert!(is_valid(&copy), "{}", copy.display());
     }
     assert_eq!(Store::open(path).unwrap().acceptor(), &Acceptor::default());
@@ -110,17 +110,82 @@ fn open_existing_refuses_invalid_stores() {
 }
 
 #[test]
-fn copy_paths_add_a_suffix_to_the_path() {
+fn paths_add_a_suffix_to_the_path() {
     let dir = Path::new("dir");
     assert_eq!(
-        copy_paths(&dir.join("acceptor")),
+        paths(&dir.join("acceptor")),
         [dir.join("acceptor.0"), dir.join("acceptor.1")]
     );
     // The suffix is added, not put in place of an extension.
     assert_eq!(
-        copy_paths(&dir.join("acceptor.bin")),
+        paths(&dir.join("acceptor.bin")),
         [dir.join("acceptor.bin.0"), dir.join("acceptor.bin.1")]
     );
+}
+
+#[test]
+fn a_store_gives_its_paths() {
+    let (_dir, path, copies, store) = new_store();
+    assert_eq!(store.paths(), &copies);
+    assert_eq!(store.paths(), &paths(&path));
+}
+
+#[cfg(unix)]
+mod unix {
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::*;
+
+    fn mode(copy: &Path) -> u32 {
+        fs::metadata(copy).unwrap().permissions().mode() & 0o777
+    }
+
+    fn set_mode(copy: &Path, mode: u32) {
+        fs::set_permissions(copy, fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    #[test]
+    fn new_files_are_readable_and_writable_by_the_owner_only() {
+        let (_dir, _, copies, _) = new_store();
+        for copy in &copies {
+            assert_eq!(mode(copy), 0o600, "{}", copy.display());
+        }
+    }
+
+    #[test]
+    fn saves_keep_the_mode_of_the_files() {
+        let (_dir, _, copies, mut a) = new_store();
+        for copy in &copies {
+            set_mode(copy, 0o640);
+        }
+        a.handle(prepare(3)).unwrap();
+        a.handle(prepare(4)).unwrap();
+        for copy in &copies {
+            assert_eq!(mode(copy), 0o640, "{}", copy.display());
+        }
+    }
+
+    #[test]
+    fn create_over_a_store_keeps_the_mode_of_the_files() {
+        let (_dir, path, copies, _) = new_store();
+        for copy in &copies {
+            set_mode(copy, 0o640);
+        }
+        Store::create(path, genesis()).unwrap();
+        for copy in &copies {
+            assert_eq!(mode(copy), 0o640, "{}", copy.display());
+        }
+    }
+
+    #[test]
+    fn a_missing_copy_is_created_again_for_the_owner_only() {
+        let (_dir, path, copies, _) = new_store();
+        set_mode(&copies[1], 0o640);
+        fs::remove_file(&copies[0]).unwrap();
+        Store::open_existing(path).unwrap().unwrap();
+        assert_eq!(mode(&copies[0]), 0o600);
+        assert_eq!(mode(&copies[1]), 0o640);
+    }
 }
 
 #[test]

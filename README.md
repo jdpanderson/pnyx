@@ -57,6 +57,9 @@ a store is first created can undo the creation of its files, because Windows
 has no documented way to sync a directory. Saves after that are as safe as on
 Unix.
 
+On Unix, a store's files are created readable and writable by their owner
+only. On Windows, they take the access list of their directory.
+
 ## Minimum Rust version
 
 Rust 1.91.
